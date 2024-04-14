@@ -16,7 +16,6 @@ else:
 
 demonstration = True
 demonstration_file = "../name_bio/demos.txt"
-# m = pipeline('text-generation', model='meta-llama/Llama-2-13b-chat-hf', device=0, torch_dtype=torch.float16)
 people_name_file = "../name_bio/prompt_entities.txt"
 
 names = [item.strip() for item in open(people_name_file).read().split('\n')]
@@ -67,4 +66,4 @@ for name in names:
     answers.append(answer)
 
 df = pd.DataFrame({'name': names_for_writing, 'answer': answers})
-df.to_csv(people_name_file.replace('.txt', f".{model_name.split('/')[-1]}_temp.csv"), index=False)
+df.to_csv(people_name_file.replace('.txt', f".{model_name.split('/')[-1]}.csv"), index=False)
