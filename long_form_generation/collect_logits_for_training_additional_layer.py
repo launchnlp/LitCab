@@ -11,18 +11,6 @@ import torch.nn.functional as F
 import sys
 import random
 
-class Calibrator(torch.nn.Module):
-    def __init__(self, hidden_size, vocab_size):
-        super(Calibrator, self).__init__()
-        self.linear = torch.nn.Linear(hidden_size, vocab_size, bias=False)
-
-    def weight_init(self):
-        nn.init.zeros_(self.linear.weight)
-        # nn.init.zeros_(self.linear.bias)
-
-    def forward(self, hidden_states):
-        return self.linear(F.relu(hidden_states))
-
 def longestCommonSubstring(A, B):
     # Initialize the matrix with 0s
     matrix = [[0 for i in range(len(B) + 1)] for j in range(len(A) + 1)]
@@ -54,15 +42,8 @@ def get_subseq_index(subseq, seq):
             return i
     return -1
 
-# file_path = "/../../FActScore/data/labeled/bio_facts_segs.correctness.json"
 file_path = sys.argv[1]
 model_name = sys.argv[2]
-
-if len(sys.argv) > 3:
-    temperature = float(sys.argv[3])
-else:
-    temperature = 1
-
 with open(file_path, 'r') as f:
     data = json.load(f)
 
@@ -70,7 +51,7 @@ if '13b' in model_name:
     m = pipeline('text-generation', model=model_name, device=0, torch_dtype=torch.float16)
 else:
     m = pipeline('text-generation', model=model_name, device=0)
-# m = pipeline('text-generation', model='meta-llama/Llama-2-13b-chat-hf', device=0, torch_dtype=torch.float16)
+    
 tokenizer = m.tokenizer
 model = m.model
 prompt="""SYSTEM: SYSTEM: You are an AI research assistant. You use a tone that is technical and scientific.
@@ -78,17 +59,11 @@ USER: Hello, who are you?
 ASSISTANT: Greeting! I am an AI research assistant. How can I help you today?
 USER: """
 
-dataset_name = "name_bio"
-ckpt_file = "../" + dataset_name + "/calibrator/Llama-2-7b-hf_calibrator_best.pt"
-calibrator = Calibrator(4096, tokenizer.vocab_size).cuda()
-calibrator.load_state_dict(torch.load(ckpt_file))
-
 names = data.keys()
-if temperature == 1:
-    output_file_path = file_path.replace('.json', '.reeval_with_addition_layer.json')
-else:
-    output_file_path = file_path.replace('.json', f'.reeval_with_addition_layer.temperature_{temperature}.json')
-output_file = open(output_file_path, 'w')
+store_hidden_states_file = "../name_bio" + "/" + model_name.split('/')[-1] + "correct_wrong_hidden_states.pt"
+store_logits_file = "../name_bio" + "/" + model_name.split('/')[-1] + "_correct_wrong_logits.pt"
+store_ids_file = "../name_bio" + "/" + model_name.split('/')[-1] + "_correct_wrong_ids.pt"
+
 demonstration_file = "../name_bio/demos.txt"
 num_demos=5
 demonstration=True
@@ -102,6 +77,10 @@ if demonstration:
     # random.shuffle(qa_pairs)
     for qa_pair in qa_pairs:
         prompt += qa_pair[0] + '\nASSISTANT: ' + qa_pair[1] + '\nUSER: '
+
+total_hidden_states = []
+total_logits = []
+total_ids = []
 
 for name in tqdm(names):
     bio = data[name]['bio']
@@ -127,13 +106,22 @@ for name in tqdm(names):
         outputs = model(**encoding)
 
         logits = outputs.logits
+        # print(logits.shape)
+        # print(hidden_states.shape)
+        # exit()
         logits = logits[..., :-1, :].contiguous()
         encoding['labels'] = encoding['labels'][..., 1:].contiguous()
-        hidden_states = outputs.hidden_states
-        hidden_states = hidden_states[-1][..., :-1, :].contiguous()
+        hidden_states = outputs.hidden_states[-1]
+        hidden_states = hidden_states[..., :-1, :].contiguous()
 
         whole_prompt_list = encoding['input_ids'].data.cpu().tolist()[0]
-        for LCS_seg in LCS_segs:
+        correct_hidden_states = []
+        correct_logits = []
+        correct_ids = []
+        wrong_hidden_states = []
+        wrong_logits = []
+        wrong_ids = []
+        for LCS_seg, c in zip(LCS_segs, correctness):
             LCS_seg_encoding = tokenizer(LCS_seg, return_tensors='pt').to(device)
             LCS_seg_list = LCS_seg_encoding['input_ids'].data.cpu().tolist()[0]
             LCS_seg_list = longestCommonSubstring(whole_prompt_list, LCS_seg_list)
@@ -146,18 +134,31 @@ for name in tqdm(names):
 
             seg_logits = logits[:, LCS_seg_index : LCS_seg_index+len(LCS_seg_list)]
             seg_hidden_states = hidden_states[:, LCS_seg_index : LCS_seg_index+len(LCS_seg_list)]
-            bias_logits = calibrator(seg_hidden_states)
-            seg_logits = seg_logits + 1*bias_logits
-            scores_of_label = [s.item() for s in F.softmax(seg_logits / temperature, dim=-1).gather(2, encoding['labels'][:, LCS_seg_index : LCS_seg_index+len(LCS_seg_list)].unsqueeze(-1)).squeeze(-1)[0]]
+            scores_of_label = [s.item() for s in F.softmax(seg_logits / 1, dim=-1).gather(2, encoding['labels'][:, LCS_seg_index : LCS_seg_index+len(LCS_seg_list)].unsqueeze(-1)).squeeze(-1)[0]]
             normalized_score = torch.exp(sum([torch.log(torch.tensor(s)) for s in scores_of_label])/len(scores_of_label)).item()
+
+            logit_write = seg_logits.data.cpu()
+            hidden_states_write = seg_hidden_states.data.cpu()
+            ids_write = encoding['labels'][:, LCS_seg_index : LCS_seg_index+len(LCS_seg_list)].data.cpu()
             # normalized_score = sum(scores_of_label)/len(scores_of_label)
             # normalized_score = min(scores_of_label)
             # print(scores_of_label)
             # print(normalized_score)
             # exit()
             seg_scores.append(normalized_score)
+            if c:
+                correct_hidden_states.append(hidden_states_write)
+                correct_logits.append(logit_write)
+                correct_ids.append(ids_write)
+            else:
+                wrong_hidden_states.append(hidden_states_write)
+                wrong_logits.append(logit_write)
+                wrong_ids.append(ids_write)
+
+        total_hidden_states.append([correct_hidden_states, wrong_hidden_states])
+        total_logits.append([correct_logits, wrong_logits])
+        total_ids.append([correct_ids, wrong_ids])
     
-    data[name]['seg_scores'] = seg_scores
-    data[name]['LCS_segs'] = LCS_segs
-    output_file.write(json.dumps(data[name]) + '\n')
-    output_file.flush()
+torch.save(total_hidden_states, store_hidden_states_file)
+torch.save(total_logits, store_logits_file)
+torch.save(total_ids, store_ids_file)

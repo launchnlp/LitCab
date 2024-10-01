@@ -76,7 +76,7 @@ USER: Hello, who are you?
 ASSISTANT: Greeting! I am an AI research assistant. How can I help you today?
 USER: """
 
-demonstration_file = "/../../ICLR_2024/factuality_prompt/demos.txt"
+demonstration_file = "../factuality_prompt/demos.txt"
 num_demos=5
 demonstration=True
 if demonstration:
